@@ -24,6 +24,9 @@ func main() {
 	})
 
 	mux.HandleFunc("/api/v1/users", func(w http.ResponseWriter, r *http.Request) {
+		// simulate long running process
+		time.Sleep(10 * time.Second)
+
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]string{"message": "get users successfully"})
 	})
