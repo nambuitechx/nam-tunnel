@@ -2,29 +2,47 @@ package relay_models
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 var (
-	ErrUserNotFound      = errors.New("user not found")
-	ErrUsernameTaken     = errors.New("username already taken")
+	ErrUserNotFound       = errors.New("user not found")
+	ErrUsernameTaken      = errors.New("username already taken")
 	ErrInvalidCredentials = errors.New("invalid credentials")
 )
 
 type UserRepository struct {
-	db *pgxpool.Pool
+	db *sql.DB
 }
 
-func NewUserRepository(db *pgxpool.Pool) *UserRepository {
+func NewUserRepository(db *sql.DB) *UserRepository {
 	return &UserRepository{db: db}
+}
+
+func scanUser(row interface{ Scan(dest ...any) error }) (*User, error) {
+	user := &User{}
+	var createdAt, updatedAt int64
+	if err := row.Scan(
+		&user.ID,
+		&user.Username,
+		&user.Password,
+		&user.Active,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return nil, err
+	}
+	user.CreatedAt = timeFromEpoch(createdAt)
+	user.UpdatedAt = timeFromEpoch(updatedAt)
+	return user, nil
 }
 
 func (r *UserRepository) Create(ctx context.Context, username, password string) (*User, error) {
@@ -33,19 +51,13 @@ func (r *UserRepository) Create(ctx context.Context, username, password string) 
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
-	user := &User{}
-	err = r.db.QueryRow(ctx, `
-		INSERT INTO users (username, password)
-		VALUES ($1, $2)
+	id := uuid.New().String()
+	now := unixNow()
+	user, err := scanUser(r.db.QueryRowContext(ctx, `
+		INSERT INTO users (id, username, password, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?)
 		RETURNING id, username, password, active, created_at, updated_at
-	`, username, string(hash)).Scan(
-		&user.ID,
-		&user.Username,
-		&user.Password,
-		&user.Active,
-		&user.CreatedAt,
-		&user.UpdatedAt,
-	)
+	`, id, username, string(hash), now, now))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrUsernameTaken
@@ -56,7 +68,7 @@ func (r *UserRepository) Create(ctx context.Context, username, password string) 
 }
 
 func (r *UserRepository) List(ctx context.Context) ([]User, error) {
-	rows, err := r.db.Query(ctx, `
+	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, username, password, active, created_at, updated_at
 		FROM users
 		ORDER BY created_at ASC
@@ -68,24 +80,23 @@ func (r *UserRepository) List(ctx context.Context) ([]User, error) {
 
 	users := []User{}
 	for rows.Next() {
-		var user User
-		if err := rows.Scan(&user.ID, &user.Username, &user.Password, &user.Active, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		user, err := scanUser(rows)
+		if err != nil {
 			return nil, err
 		}
-		users = append(users, user)
+		users = append(users, *user)
 	}
 	return users, rows.Err()
 }
 
 func (r *UserRepository) GetByID(ctx context.Context, id string) (*User, error) {
-	user := &User{}
-	err := r.db.QueryRow(ctx, `
+	user, err := scanUser(r.db.QueryRowContext(ctx, `
 		SELECT id, username, password, active, created_at, updated_at
 		FROM users
-		WHERE id = $1
-	`, id).Scan(&user.ID, &user.Username, &user.Password, &user.Active, &user.CreatedAt, &user.UpdatedAt)
+		WHERE id = ?
+	`, id))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrUserNotFound
 		}
 		return nil, err
@@ -94,14 +105,13 @@ func (r *UserRepository) GetByID(ctx context.Context, id string) (*User, error) 
 }
 
 func (r *UserRepository) GetByUsername(ctx context.Context, username string) (*User, error) {
-	user := &User{}
-	err := r.db.QueryRow(ctx, `
+	user, err := scanUser(r.db.QueryRowContext(ctx, `
 		SELECT id, username, password, active, created_at, updated_at
 		FROM users
-		WHERE username = $1
-	`, username).Scan(&user.ID, &user.Username, &user.Password, &user.Active, &user.CreatedAt, &user.UpdatedAt)
+		WHERE username = ?
+	`, username))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrUserNotFound
 		}
 		return nil, err
@@ -111,45 +121,35 @@ func (r *UserRepository) GetByUsername(ctx context.Context, username string) (*U
 
 func (r *UserRepository) Update(ctx context.Context, id string, password *string, active *bool) (*User, error) {
 	setParts := make([]string, 0, 3)
-	args := []any{id}
-	argIdx := 2
+	args := make([]any, 0, 4)
 
 	if password != nil {
 		hash, err := bcrypt.GenerateFromPassword([]byte(*password), bcrypt.DefaultCost)
 		if err != nil {
 			return nil, fmt.Errorf("hash password: %w", err)
 		}
-		setParts = append(setParts, fmt.Sprintf("password = $%d", argIdx))
+		setParts = append(setParts, "password = ?")
 		args = append(args, string(hash))
-		argIdx++
 	}
 	if active != nil {
-		setParts = append(setParts, fmt.Sprintf("active = $%d", argIdx))
+		setParts = append(setParts, "active = ?")
 		args = append(args, *active)
-		argIdx++
 	}
 
-	setParts = append(setParts, fmt.Sprintf("updated_at = $%d", argIdx))
-	args = append(args, time.Now().UTC())
+	setParts = append(setParts, "updated_at = ?")
+	args = append(args, unixNow())
+	args = append(args, id)
 
-	user := &User{}
 	query := fmt.Sprintf(`
 		UPDATE users
 		SET %s
-		WHERE id = $1
+		WHERE id = ?
 		RETURNING id, username, password, active, created_at, updated_at
 	`, strings.Join(setParts, ", "))
 
-	err := r.db.QueryRow(ctx, query, args...).Scan(
-		&user.ID,
-		&user.Username,
-		&user.Password,
-		&user.Active,
-		&user.CreatedAt,
-		&user.UpdatedAt,
-	)
+	user, err := scanUser(r.db.QueryRowContext(ctx, query, args...))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrUserNotFound
 		}
 		return nil, err
@@ -158,11 +158,15 @@ func (r *UserRepository) Update(ctx context.Context, id string, password *string
 }
 
 func (r *UserRepository) Delete(ctx context.Context, id string) error {
-	tag, err := r.db.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
+	res, err := r.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return ErrUserNotFound
 	}
 	return nil
@@ -186,6 +190,6 @@ func (r *UserRepository) Authenticate(ctx context.Context, username, password st
 }
 
 func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+	var se *sqlite.Error
+	return errors.As(err, &se) && se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
 }

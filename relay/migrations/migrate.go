@@ -4,10 +4,11 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"strings"
+	"os"
+	"path/filepath"
 
 	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
+	_ "github.com/golang-migrate/migrate/v4/database/sqlite"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 )
 
@@ -15,14 +16,13 @@ import (
 var files embed.FS
 
 func Up(databaseURL string) error {
-	source, err := iofs.New(files, ".")
-	if err != nil {
-		return fmt.Errorf("migration source: %w", err)
+	if err := ensureDatabaseDir(databaseURL); err != nil {
+		return err
 	}
 
-	m, err := migrate.NewWithSourceInstance("iofs", source, pgxDSN(databaseURL))
+	m, err := newMigrate(databaseURL)
 	if err != nil {
-		return fmt.Errorf("migration instance: %w", err)
+		return err
 	}
 	defer m.Close()
 
@@ -33,14 +33,9 @@ func Up(databaseURL string) error {
 }
 
 func Down(databaseURL string) error {
-	source, err := iofs.New(files, ".")
+	m, err := newMigrate(databaseURL)
 	if err != nil {
-		return fmt.Errorf("migration source: %w", err)
-	}
-
-	m, err := migrate.NewWithSourceInstance("iofs", source, pgxDSN(databaseURL))
-	if err != nil {
-		return fmt.Errorf("migration instance: %w", err)
+		return err
 	}
 	defer m.Close()
 
@@ -50,6 +45,33 @@ func Down(databaseURL string) error {
 	return nil
 }
 
-func pgxDSN(databaseURL string) string {
-	return strings.Replace(databaseURL, "postgres://", "pgx5://", 1)
+func newMigrate(databaseURL string) (*migrate.Migrate, error) {
+	source, err := iofs.New(files, ".")
+	if err != nil {
+		return nil, fmt.Errorf("migration source: %w", err)
+	}
+
+	m, err := migrate.NewWithSourceInstance("iofs", source, databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("migration instance: %w", err)
+	}
+	return m, nil
+}
+
+func ensureDatabaseDir(databaseURL string) error {
+	const prefix = "sqlite://"
+	if len(databaseURL) <= len(prefix) || databaseURL[:len(prefix)] != prefix {
+		return nil
+	}
+
+	path := databaseURL[len(prefix):]
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create database directory: %w", err)
+	}
+	return nil
 }

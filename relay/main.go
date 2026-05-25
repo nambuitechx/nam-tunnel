@@ -18,7 +18,7 @@ func main() {
 	ctx := context.Background()
 	envConfig := relay_configs.NewEnvConfig()
 
-	if err := relay_migrations.Up(envConfig.DatabaseDSN()); err != nil {
+	if err := relay_migrations.Up(envConfig.DatabaseMigrateURL()); err != nil {
 		log.Fatal("migrate:", err)
 	}
 

@@ -14,7 +14,7 @@ func main() {
 	flag.Parse()
 
 	envConfig := relay_configs.NewEnvConfig()
-	dsn := envConfig.DatabaseDSN()
+	dsn := envConfig.DatabaseMigrateURL()
 
 	var err error
 	switch *direction {
