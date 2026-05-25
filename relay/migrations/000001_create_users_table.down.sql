@@ -1,1 +1,2 @@
+DROP TABLE IF EXISTS user_pats;
 DROP TABLE IF EXISTS users;

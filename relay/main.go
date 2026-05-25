@@ -29,9 +29,11 @@ func main() {
 	defer db.Close()
 
 	userRepo := relay_models.NewUserRepository(db)
+	patRepo := relay_models.NewUserPatRepository(db)
 
 	tunnelHandler := relay_handlers.NewTunnelHandler()
 	userHandler := relay_handlers.NewUserHandler(userRepo)
+	patHandler := relay_handlers.NewUserPatHandler(userRepo, patRepo)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /connect", tunnelHandler.Connect)
@@ -45,6 +47,12 @@ func main() {
 	mux.HandleFunc("PUT /api/v1/users/{id}", userHandler.Update)
 	mux.HandleFunc("DELETE /api/v1/users/{id}", userHandler.Delete)
 	mux.HandleFunc("POST /api/v1/auth/login", userHandler.Login)
+
+	mux.HandleFunc("POST /api/v1/users/{user_id}/pats", patHandler.Issue)
+	mux.HandleFunc("GET /api/v1/users/{user_id}/pats", patHandler.List)
+	mux.HandleFunc("DELETE /api/v1/users/{user_id}/pats", patHandler.DeleteAll)
+	mux.HandleFunc("GET /api/v1/users/{user_id}/pats/{id}", patHandler.Get)
+	mux.HandleFunc("DELETE /api/v1/users/{user_id}/pats/{id}", patHandler.Delete)
 
 	srv := &http.Server{Addr: ":" + envConfig.Port, Handler: mux}
 
